@@ -11,7 +11,7 @@ Single-activity Jetpack Compose app that loads bundled `.glb` models onto **one*
 - Compose-native `Scene` + `ModelNode` — no Fragments, one `MainActivity`.
 - Loads `.glb` directly; Filament is built for real-time glTF on Android.
 - **2.2.1** instead of 4.x: SceneView 4.38 needs compileSdk 37 and AGP 9; this project is AGP 8.13 / compileSdk 36.
-- Not ARSceneView — no ARCore, no extra camera/network permissions.
+- Not ARSceneView — no ARCore. **No `INTERNET` / camera / network permissions** (stripped from the manifest even if a library tries to merge them). Offline assets only.
 
 ## Performance optimisations
 

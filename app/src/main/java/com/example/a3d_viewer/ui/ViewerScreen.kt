@@ -25,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
@@ -50,6 +51,7 @@ import com.example.a3d_viewer.model.ContainerInteractionMode
 import com.example.a3d_viewer.model.ViewerState
 import com.example.a3d_viewer.projection.LabelProjector
 import io.github.sceneview.Scene
+import io.github.sceneview.SceneView
 import io.github.sceneview.math.Position
 import io.github.sceneview.math.Rotation
 import io.github.sceneview.model.Model
@@ -59,8 +61,13 @@ import io.github.sceneview.rememberCameraNode
 import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberModelLoader
 import io.github.sceneview.rememberNodes
+import java.util.ArrayDeque
 import kotlin.math.abs
 import kotlin.math.tan
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Single full-screen Filament viewport + lightweight Compose overlays for containers / Add Model.
@@ -78,16 +85,27 @@ fun ViewerScreen(
     val nodeById = remember { mutableMapOf<String, ModelNode>() }
     val modelTemplates = remember { mutableMapOf<String, Model>() }
     val templateRefs = remember { mutableMapOf<String, Int>() }
+    val unusedByPath = remember { mutableMapOf<String, ArrayDeque<ModelNode>>() }
     val appliedXform = remember { mutableMapOf<String, AppliedXform>() }
     val pathById = remember { mutableMapOf<String, String>() }
     val labelEntitiesById = remember { mutableMapOf<String, IntArray>() }
     val labelProjector = remember { LabelProjector() }
+    val scope = rememberCoroutineScope()
+    val alive = remember { booleanArrayOf(true) }
+    var sceneViewRef by remember { mutableStateOf<SceneView?>(null) }
     var fpsText by remember { mutableStateOf("") }
     val fpsFrames = remember { intArrayOf(0) }
-    val fpsWindowStartNs = remember { longArrayOf(0L) }
 
     LaunchedEffect(Unit) {
         state.loadAvailableAssets(ModelAssetCatalog.listBundledModels(assetManager))
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000L)
+            if (alive[0]) fpsText = "${fpsFrames[0]} FPS"
+            fpsFrames[0] = 0
+        }
     }
 
     val engine = rememberEngine()
@@ -99,13 +117,16 @@ fun ViewerScreen(
     }
 
     DisposableEffect(Unit) {
+        alive[0] = true
         onDispose {
-            nodeById.values.forEach { it.destroy() }
+            // Do not destroy ModelNode / FilamentAsset here. SceneView's rememberNodes
+            // + rememberModelLoader already tear them down; a second pass SIGSEGVs in gltfio.
+            alive[0] = false
             nodeById.clear()
+            unusedByPath.clear()
             appliedXform.clear()
             pathById.clear()
             labelEntitiesById.clear()
-            modelTemplates.values.forEach { runCatching { modelLoader.destroyModel(it) } }
             modelTemplates.clear()
             templateRefs.clear()
             labelProjector.clear()
@@ -126,48 +147,54 @@ fun ViewerScreen(
 
             val removed = nodeById.keys.filter { it !in activeIds }
             removed.forEach { id ->
-                nodeById.remove(id)?.let { node ->
-                    childNodes.remove(node)
-                    node.destroy()
-                }
+                val node = nodeById.remove(id)
                 appliedXform.remove(id)
                 labelEntitiesById.remove(id)
-                val path = pathById.remove(id) ?: return@forEach
-                val refs = (templateRefs[path] ?: 1) - 1
-                if (refs <= 0) {
-                    templateRefs.remove(path)
-                    modelTemplates.remove(path)?.let { runCatching { modelLoader.destroyModel(it) } }
-                } else {
-                    templateRefs[path] = refs
+                val path = pathById.remove(id)
+                if (node != null) {
+                    // Detach only. node.destroy() frees the glTF root entity while the
+                    // FilamentAsset still owns it; destroyModel() then double-frees → SIGSEGV.
+                    node.isVisible = false
+                    childNodes.remove(node)
+                    if (path != null) {
+                        unusedByPath.getOrPut(path) { ArrayDeque() }.addLast(node)
+                    }
                 }
             }
 
             state.activeModels.forEach { instance ->
                 if (nodeById.containsKey(instance.id)) return@forEach
                 val path = instance.asset.assetPath
-                val template = modelTemplates.getOrPut(path) { modelLoader.createModel(path) }
-                val alreadyUsingDefault = (templateRefs[path] ?: 0) > 0
-                val modelInstance = if (alreadyUsingDefault) {
-                    modelLoader.createInstance(template) ?: modelLoader.createModelInstance(path)
+                val recycled = unusedByPath[path]?.pollFirst()
+                val node = if (recycled != null) {
+                    recycled.isVisible = true
+                    recycled
                 } else {
-                    template.instance
+                    val template = modelTemplates.getOrPut(path) { modelLoader.createModel(path) }
+                    val alreadyUsingDefault = (templateRefs[path] ?: 0) > 0
+                    val modelInstance = if (alreadyUsingDefault) {
+                        modelLoader.createInstance(template) ?: modelLoader.createModelInstance(path)
+                    } else {
+                        template.instance
+                    }
+                    ModelNode(
+                        modelInstance = modelInstance,
+                        autoAnimate = false,
+                        scaleToUnits = containerWorldUnits(instance, viewport),
+                    ).apply {
+                        isShadowCaster = false
+                        isShadowReceiver = false
+                        collisionShape = null
+                    }.also {
+                        templateRefs[path] = (templateRefs[path] ?: 0) + 1
+                    }
                 }
-                val units = containerWorldUnits(instance, viewport)
-                val node = ModelNode(
-                    modelInstance = modelInstance,
-                    autoAnimate = false,
-                    scaleToUnits = units,
-                )
-                node.isShadowCaster = false
-                node.isShadowReceiver = false
-                node.collisionShape = null
                 appliedXform[instance.id] = AppliedXform()
                 labelEntitiesById[instance.id] =
                     labelProjector.bindLiveEntities(node, instance.labels)
                 pathById[instance.id] = path
-                templateRefs[path] = (templateRefs[path] ?: 0) + 1
                 nodeById[instance.id] = node
-                childNodes += node
+                if (node !in childNodes) childNodes += node
             }
         }
 
@@ -179,82 +206,89 @@ fun ViewerScreen(
             childNodes = childNodes,
             cameraNode = cameraNode,
             cameraManipulator = null,
-            onFrame = { frameTimeNanos ->
-                if (fpsWindowStartNs[0] == 0L) fpsWindowStartNs[0] = frameTimeNanos
-                fpsFrames[0] += 1
-                if (frameTimeNanos - fpsWindowStartNs[0] >= 1_000_000_000L) {
-                    fpsText = "${fpsFrames[0]} FPS"
-                    fpsFrames[0] = 0
-                    fpsWindowStartNs[0] = frameTimeNanos
-                }
+            onViewCreated = { sceneViewRef = this },
+            onFrame = {
+                if (alive[0]) {
+                    fpsFrames[0] += 1
 
-                state.activeModels.forEach { instance ->
-                    val node = nodeById[instance.id] ?: return@forEach
-                    val prev = appliedXform.getOrPut(instance.id) { AppliedXform() }
-                    val units = containerWorldUnits(instance, viewport)
-                    val sizeDirty = prev.units.isNaN() || abs(prev.units - units) > 1e-3f
-                    val posDirty = prev.cx.isNaN() ||
-                        abs(prev.cx - instance.center.x) > 0.25f ||
-                        abs(prev.cy - instance.center.y) > 0.25f
-                    val rotDirty = prev.yaw.isNaN() ||
-                        abs(prev.yaw - instance.modelYawDeg) > 0.05f ||
-                        abs(prev.pitch - instance.modelPitchDeg) > 0.05f
-                    if (!sizeDirty && !posDirty && !rotDirty) return@forEach
-
-                    if (sizeDirty) {
-                        // Re-normalize from the asset bbox — never overwrite with a raw Scale.
-                        node.scaleToUnitCube(units)
-                        prev.units = units
-                    }
-                    if (posDirty || sizeDirty) {
-                        val worldPos = screenToWorldApprox(instance.center, viewport)
-                        node.position = Position(
-                            x = worldPos.x - node.center.x * node.scale.x,
-                            y = worldPos.y - node.center.y * node.scale.y,
-                            z = worldPos.z,
-                        )
-                        prev.cx = instance.center.x
-                        prev.cy = instance.center.y
-                    }
-                    if (rotDirty) {
-                        node.rotation = Rotation(
-                            x = instance.modelPitchDeg,
-                            y = instance.modelYawDeg,
-                            z = 0f,
-                        )
-                        prev.yaw = instance.modelYawDeg
-                        prev.pitch = instance.modelPitchDeg
-                    }
-                }
-
-                var anyLabels = false
-                state.activeModels.forEach { instance ->
-                    if (instance.labelsVisible && instance.labels.isNotEmpty()) {
-                        anyLabels = true
-                    }
-                }
-                if (anyLabels) {
-                    labelProjector.beginFrame(
-                        camera = cameraNode.camera,
-                        widthPx = viewport.width,
-                        heightPx = viewport.height,
-                    )
                     state.activeModels.forEach { instance ->
-                        if (!instance.labelsVisible || instance.labels.isEmpty()) return@forEach
                         val node = nodeById[instance.id] ?: return@forEach
-                        labelProjector.project(
-                            engine,
-                            node,
-                            instance.labels,
-                            labelEntitiesById[instance.id],
-                        )
+                        val prev = appliedXform.getOrPut(instance.id) { AppliedXform() }
+                        val units = containerWorldUnits(instance, viewport)
+                        val sizeDirty = prev.units.isNaN() || abs(prev.units - units) > 1e-3f
+                        val posDirty = prev.cx.isNaN() ||
+                            abs(prev.cx - instance.center.x) > 0.25f ||
+                            abs(prev.cy - instance.center.y) > 0.25f
+                        val rotDirty = prev.yaw.isNaN() ||
+                            abs(prev.yaw - instance.modelYawDeg) > 0.05f ||
+                            abs(prev.pitch - instance.modelPitchDeg) > 0.05f
+                        if (!sizeDirty && !posDirty && !rotDirty) return@forEach
+
+                        if (sizeDirty) {
+                            // Re-normalize from the asset bbox — never overwrite with a raw Scale.
+                            node.scaleToUnitCube(units)
+                            prev.units = units
+                        }
+                        if (posDirty || sizeDirty) {
+                            val worldPos = screenToWorldApprox(instance.center, viewport)
+                            node.position = Position(
+                                x = worldPos.x - node.center.x * node.scale.x,
+                                y = worldPos.y - node.center.y * node.scale.y,
+                                z = worldPos.z,
+                            )
+                            prev.cx = instance.center.x
+                            prev.cy = instance.center.y
+                        }
+                        if (rotDirty) {
+                            node.rotation = Rotation(
+                                x = instance.modelPitchDeg,
+                                y = instance.modelYawDeg,
+                                z = 0f,
+                            )
+                            prev.yaw = instance.modelYawDeg
+                            prev.pitch = instance.modelPitchDeg
+                        }
                     }
-                    labelProjector.publish()
-                } else if (labelProjector.count != 0) {
-                    labelProjector.clear()
+
+                    var anyLabels = false
+                    state.activeModels.forEach { instance ->
+                        if (instance.labelsVisible && instance.labels.isNotEmpty()) {
+                            anyLabels = true
+                        }
+                    }
+                    if (anyLabels) {
+                        labelProjector.beginFrame(
+                            camera = cameraNode.camera,
+                            widthPx = viewport.width,
+                            heightPx = viewport.height,
+                        )
+                        state.activeModels.forEach { instance ->
+                            if (!instance.labelsVisible || instance.labels.isEmpty()) return@forEach
+                            val node = nodeById[instance.id] ?: return@forEach
+                            labelProjector.project(
+                                engine,
+                                node,
+                                instance.labels,
+                                labelEntitiesById[instance.id],
+                            )
+                        }
+                        labelProjector.publish()
+                    } else if (labelProjector.count != 0) {
+                        labelProjector.clear()
+                    }
                 }
             },
         )
+
+        // Runs before Scene's AndroidView.onRelease (later DisposableEffects dispose first).
+        // Emptying childNodes first is the SceneView 2.2.1 workaround for libgltfio SIGSEGV 0x2a8.
+        DisposableEffect(Unit) {
+            onDispose {
+                alive[0] = false
+                sceneViewRef?.childNodes = emptyList()
+                childNodes.clear()
+            }
+        }
 
         PartLabelOverlay(
             projector = labelProjector,
@@ -295,10 +329,14 @@ fun ViewerScreen(
                 .padding(20.dp),
             state = state,
             onPick = { asset ->
-                val labels = labelCache.getOrPut(asset.assetPath) {
-                    GlbLabelParser.parseFromAsset(assetManager, asset.assetPath)
+                scope.launch {
+                    val labels = withContext(Dispatchers.Default) {
+                        labelCache[asset.assetPath] ?: GlbLabelParser
+                            .parseFromAsset(assetManager, asset.assetPath)
+                            .also { labelCache[asset.assetPath] = it }
+                    }
+                    if (alive[0]) state.addModel(asset, labels, viewport)
                 }
-                state.addModel(asset, labels, viewport)
             },
         )
     }
