@@ -2,7 +2,6 @@ package com.example.a3d_viewer.model
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
@@ -74,67 +73,3 @@ class ActiveModelInstance(
     }
 }
 
-/**
- * Compose-facing state holder for the multi-model viewer.
- * Step 1–2: asset listing + add/remove. Gestures / projection wired in later steps.
- */
-class ViewerState {
-    val activeModels = mutableStateListOf<ActiveModelInstance>()
-
-    var availableAssets by mutableStateOf<List<BundledModelAsset>>(emptyList())
-        private set
-
-    var addMenuExpanded by mutableStateOf(false)
-    var focusedId by mutableStateOf<String?>(null)
-
-    fun loadAvailableAssets(assets: List<BundledModelAsset>) {
-        availableAssets = assets
-    }
-
-    fun focus(id: String) {
-        focusedId = id
-    }
-
-    fun addModel(
-        asset: BundledModelAsset,
-        labels: List<PartLabel>,
-        viewport: IntSize,
-    ) {
-        val index = activeModels.size
-        val cell = layoutSlot(index, viewport)
-        val created = ActiveModelInstance(
-            asset = asset,
-            labels = labels,
-            initialCenter = cell.center,
-            initialSizePx = cell.sizePx,
-        )
-        activeModels += created
-        focusedId = created.id
-        addMenuExpanded = false
-    }
-
-    fun removeModel(id: String) {
-        activeModels.removeAll { it.id == id }
-        if (focusedId == id) {
-            focusedId = activeModels.lastOrNull()?.id
-        }
-    }
-
-    private data class Slot(val center: Offset, val sizePx: Float)
-
-    private fun layoutSlot(index: Int, viewport: IntSize): Slot {
-        val w = viewport.width.coerceAtLeast(1).toFloat()
-        val h = viewport.height.coerceAtLeast(1).toFloat()
-        val cols = 2
-        val rows = 3
-        val col = index % cols
-        val row = (index / cols) % rows
-        val cellW = w / cols
-        val cellH = h / rows
-        val size = minOf(cellW, cellH) * 0.72f
-        return Slot(
-            center = Offset(cellW * (col + 0.5f), cellH * (row + 0.5f)),
-            sizePx = size,
-        )
-    }
-}
