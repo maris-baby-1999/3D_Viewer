@@ -11,17 +11,11 @@ import com.example.a3d_viewer.assets.PartLabel
 import java.util.UUID
 
 enum class ContainerInteractionMode {
-    /** 1-finger drag moves container; 2-finger pinch resizes container. */
     Normal,
 
-    /** 1-finger rotates model; 2-finger pinch zooms model. */
     Interaction,
 }
 
-/**
- * One live model instance on the shared 3D canvas.
- * Container frame is in screen/Compose space; 3D transform is applied inside the single Scene.
- */
 class ActiveModelInstance(
     val id: String = UUID.randomUUID().toString(),
     val asset: BundledModelAsset,
@@ -32,14 +26,11 @@ class ActiveModelInstance(
     var center by mutableStateOf(initialCenter)
     var sizePx by mutableFloatStateOf(initialSizePx)
 
-    /** Smallest allowed frame — cannot pinch smaller than the size at load. */
     val minSizePx: Float = initialSizePx.coerceAtLeast(MIN_CONTAINER_PX)
 
-    /** Model-local yaw/pitch used in Interaction mode (degrees). */
     var modelYawDeg by mutableFloatStateOf(0f)
     var modelPitchDeg by mutableFloatStateOf(0f)
 
-    /** Extra uniform scale applied to the 3D model itself (pinch-zoom in Interaction mode). */
     var modelZoom by mutableFloatStateOf(1f)
 
     var labelsVisible by mutableStateOf(false)

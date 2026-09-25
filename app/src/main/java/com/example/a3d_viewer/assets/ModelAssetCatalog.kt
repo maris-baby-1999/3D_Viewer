@@ -2,9 +2,7 @@ package com.example.a3d_viewer.assets
 
 import android.content.res.AssetManager
 
-/**
- * Scans `assets/` for bundled `.glb` files and exposes a stable catalog for the Add Model UI.
- */
+
 data class BundledModelAsset(
     /** Filename including `.glb` extension (also the asset path). */
     val fileName: String,

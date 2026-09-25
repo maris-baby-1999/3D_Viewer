@@ -190,7 +190,6 @@ object GlbLabelParser {
         m[15] = 1f
     }
 
-    /** Column-major 4x4: out = a * b */
     private fun multiply(a: FloatArray, b: FloatArray, out: FloatArray) {
         for (col in 0 until 4) {
             for (row in 0 until 4) {

@@ -2,7 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Offline viewer: strip INTERNET even if a library merges it in. -->
     <uses-permission
         android:name="android.permission.INTERNET"
         tools:node="remove" />
